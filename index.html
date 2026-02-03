@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Fruit Factory RPG</title>
+    <!-- Alternative CDN for the library -->
+    <script src="https://unpkg.com"></script>
+    <style>
+        body { background: #1a1a1a; color: #eee; font-family: 'Courier New', monospace; margin: 0; overflow: hidden; display: flex; flex-direction: column; align-items: center; }
+        #ui-top { width: 800px; padding: 10px; display: flex; justify-content: space-around; background: #333; border-bottom: 4px solid #555; z-index: 10; }
+        #game-container { position: relative; width: 800px; height: 600px; background: #4a7856; border: 4px solid #555; overflow: hidden; }
+        canvas { image-rendering: pixelated; width: 800px; height: 600px; display: block; background: #4a7856; }
+        #phone { position: absolute; right: 20px; top: 20px; width: 190px; background: #222; border: 4px solid #888; border-radius: 20px; display: none; padding: 15px; z-index: 100; }
+        .btn { width: 100%; margin: 5px 0; padding: 10px; cursor: pointer; background: #444; color: white; border: 1px solid #666; font-family: inherit; }
+        #login-overlay { position: absolute; inset: 0; background: rgba(0,0,0,0.95); z-index: 200; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+        #login-overlay input { padding: 15px; font-size: 18px; margin-bottom: 10px; width: 250px; text-align: center; background: #333; color: white; border: 2px solid #4caf50; }
+        #login-overlay button { padding: 15px 30px; font-size: 18px; background: #4caf50; color: white; border: none; cursor: pointer; }
+        #inventory-ui { position: absolute; left: 10px; bottom: 10px; background: rgba(0,0,0,0.7); padding: 10px; font-size: 12px; border-radius: 5px; pointer-events: none; }
+    </style>
+</head>
+<body>
+
+<div id="ui-top">
+    <div>👤 <span id="user-display">Guest</span></div>
+    <div>💰 <span id="coin-display" style="color: #ffd700;">100</span></div>
+    <div>⏰ <span id="time-display">08:00</span></div>
+</div>
+
+<div id="game-container">
+    <div id="login-overlay">
+        <h1 style="color: #4caf50;">FRUIT FACTORY</h1>
+        <input type="text" id="username-input" placeholder="Your Username..." maxlength="15">
+        <button type="button" onclick="initGame()">Start Game</button>
+        <p id="status-text" style="font-size: 10px; color: #888; margin-top: 10px;">Checking Connection...</p>
+    </div>
+    <canvas id="gameCanvas" width="800" height="600"></canvas>
+    <div id="inventory-ui">
+        Apples: <span id="inv-Apple">0</span> | Wheat: <span id="inv-Wheat">0</span><br>
+        Juice: <span id="inv-Juice">0</span> | Dough: <span id="inv-Dough">0</span>
+    </div>
+    <div id="phone">
+        <h3 style="text-align:center; margin: 0;">iFruit 📱</h3>
+        <button class="btn" onclick="orderPallet('Apple', 20)">Order Apple ($20)</button>
+        <button class="btn" onclick="orderPallet('Wheat', 10)">Order Wheat ($10)</button>
+        <button class="btn" onclick="sellAll()" style="background:#2e7d32">Sell All</button>
+        <div id="bakery-menu" style="display:none; border-top: 1px dashed #ffd700; margin-top: 10px; padding-top: 5px;">
+            <button class="btn" style="background:#5d4037" onclick="orderPallet('Dough', 30)">Order Dough ($30)</button>
+        </div>
+        <button class="btn" style="background:#822; margin-top:10px;" onclick="togglePhone()">Close</button>
+    </div>
+</div>
+
+<script>
+// --- SUPABASE CONFIG ---
+const SB_URL = 'https://bshasgqbkqfwzphpdirs.supabase.co'; 
+const SB_KEY = 'sb_publishable_RczeHCgM-R910JWoHIfn9g_V0pWQ_xE';
+let _supabase = null;
+
+// Initialize as soon as script loads
+window.onload = function() {
+    try {
+        if (window.supabase) {
+            _supabase = window.supabase.createClient(SB_URL, SB_KEY);
+            document.getElementById('status-text').innerText = "Cloud: Ready";
+        } else {
+            document.getElementById('status-text').innerText = "Cloud: Unavailable (Local Mode)";
+        }
+    } catch (e) {
+        document.getElementById('status-text').innerText = "Local Mode Active";
+    }
+};
+
+let gameState = {
+    user: "Guest", coins: 100, time: 480, 
+    bakeryUnlocked: false,
+    inventory: { Apple: 0, Wheat: 0, Dough: 0, Juice: 0 },
+    forklift: { x: 400, y: 500, angle: 0, speed: 0 },
+    machines: [
+        { name: "Juicer", x: 100, y: 150, working: false, progress: 0, input: "Apple", output: "Juice" },
+        { name: "Mill", x: 250, y: 150, working: false, progress: 0, input: "Wheat", output: "Dough" }
+    ]
+};
+
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+const keys = {};
+
+function initGame() {
+    const name = document.getElementById('username-input').value.trim();
+    if (!name) return alert("Please enter a name!");
+    
+    gameState.user = name;
+    document.getElementById('user-display').innerText = name;
+    document.getElementById('login-overlay').style.display = 'none';
+    
+    window.addEventListener('keydown', e => { keys[e.code] = true; if(e.code === 'KeyP') togglePhone(); });
+    window.addEventListener('keyup', e => keys[e.code] = false);
+    
+    if (_supabase) loadFromCloud();
+    requestAnimationFrame(gameLoop);
+    setInterval(() => { if(_supabase) saveToCloud(); }, 30000);
+}
+
+function gameLoop() {
+    update();
+    draw();
+    requestAnimationFrame(gameLoop);
+}
+
+function update() {
+    gameState.time += 0.4;
+    if (gameState.time >= 1440) gameState.time = 0;
+    if (!gameState.bakeryUnlocked && gameState.coins >= 1000) gameState.bakeryUnlocked = true;
+
+    let f = gameState.forklift;
+    if (keys['KeyW']) f.speed = Math.min(f.speed + 0.15, 3.5);
+    else if (keys['KeyS']) f.speed = Math.max(f.speed - 0.15, -2);
+    else f.speed *= 0.9;
+    
+    if (keys['KeyA']) f.angle -= 0.05;
+    if (keys['KeyD']) f.angle += 0.05;
+    f.x += Math.cos(f.angle) * f.speed;
+    f.y += Math.sin(f.angle) * f.speed;
+
+    gameState.machines.forEach(m => {
+        if (m.working) {
+            m.progress += 0.5;
+            if (m.progress >= 100) { m.working = false; m.progress = 0; gameState.inventory[m.output]++; }
+        }
+    });
+
+    if (keys['Space']) {
+        keys['Space'] = false;
+        gameState.machines.forEach(m => {
+            if (Math.hypot(f.x - m.x, f.y - m.y) < 50 && !m.working && gameState.inventory[m.input] > 0) {
+                gameState.inventory[m.input]--; m.working = true;
+            }
+        });
+    }
+    updateUI();
+}
+
+function draw() {
+    ctx.clearRect(0, 0, 800, 600);
+    ctx.fillStyle = "#4a7856"; ctx.fillRect(0, 0, 800, 600);
+    ctx.fillStyle = "#333"; ctx.fillRect(50, 50, 300, 250);
+    
+    gameState.machines.forEach(m => {
+        ctx.fillStyle = m.working ? "#4caf50" : "#777";
+        ctx.fillRect(m.x - 20, m.y - 20, 40, 40);
+        ctx.fillStyle = "white"; ctx.fillText(m.name, m.x-15, m.y-25);
+        if(m.working) { ctx.fillStyle = "lime"; ctx.fillRect(m.x - 20, m.y + 25, (m.progress/100)*40, 5); }
+    });
+    
+    if (gameState.bakeryUnlocked) { 
+        ctx.fillStyle = "#8d6e63"; ctx.fillRect(550, 50, 180, 120); 
+        ctx.fillStyle="white"; ctx.fillText("BAKERY", 560, 45); 
+    }
+    
+    ctx.save(); ctx.translate(gameState.forklift.x, gameState.forklift.y); ctx.rotate(gameState.forklift.angle);
+    ctx.fillStyle = "#f39c12"; ctx.fillRect(-20, -15, 40, 30);
+    ctx.fillStyle = "black"; ctx.fillRect(15, -12, 10, 24);
+    ctx.restore();
+}
+
+function updateUI() {
+    document.getElementById('coin-display').innerText = Math.floor(gameState.coins);
+    let hrs = Math.floor(gameState.time / 60).toString().padStart(2, '0');
+    let mins = Math.floor(gameState.time % 60).toString().padStart(2, '0');
+    document.getElementById('time-display').innerText = `${hrs}:${mins}`;
+    document.getElementById('bakery-menu').style.display = gameState.bakeryUnlocked ? 'block' : 'none';
+    for (let item in gameState.inventory) {
+        let el = document.getElementById('inv-' + item);
+        if (el) el.innerText = gameState.inventory[item];
+    }
+}
+
+function togglePhone() { const p = document.getElementById('phone'); p.style.display = (p.style.display === 'block') ? 'none' : 'block'; }
+
+function orderPallet(item, price) {
+    if (gameState.coins >= price) { gameState.coins -= price; gameState.inventory[item]++; }
+}
+
+function sellAll() {
+    let cash = (gameState.inventory.Juice * 60) + (gameState.inventory.Dough * 80);
+    gameState.coins += cash; gameState.inventory.Juice = 0; gameState.inventory.Dough = 0;
+}
+
+async function saveToCloud() {
+    if (!_supabase) return;
+    await _supabase.from('islands').upsert({
+        username: gameState.user, fruit_coins: gameState.coins,
+        data: { bakery: gameState.bakeryUnlocked, inv: gameState.inventory }
+    }, { onConflict: 'username' });
+}
+
+async function loadFromCloud() {
+    const { data } = await _supabase.from('islands').select('*').eq('username', gameState.user).single();
+    if (data) { 
+        gameState.coins = data.fruit_coins; 
+        gameState.bakeryUnlocked = data.data.bakery; 
+        gameState.inventory = data.data.inv || gameState.inventory; 
+    }
+}
+</script>
+</body>
+</html>
